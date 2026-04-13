@@ -14,14 +14,9 @@ HEADERS = {
 
 # ===== GLOBAL =====
 prev_data = {}
-last_signal = ""
-last_trade_time = 0
 prev_price = 0
-
-# ===== ACCURACY =====
 total_trades = 0
 wins = 0
-losses = 0
 
 # ===== TELEGRAM =====
 def send_telegram(msg):
@@ -34,14 +29,10 @@ def send_telegram(msg):
 # ===== EXPIRY =====
 def get_expiry():
     today = datetime.now()
-    days_ahead = 1 - today.weekday()
+    days_ahead = 3 - today.weekday()
     if days_ahead <= 0:
         days_ahead += 7
     expiry = today + timedelta(days=days_ahead)
-
-    if expiry.strftime("%Y-%m-%d") == "2026-04-14":
-        expiry -= timedelta(days=1)
-
     return expiry.strftime("%Y-%m-%d")
 
 # ===== LTP =====
@@ -105,7 +96,7 @@ def get_data(chain, atm):
 
     return data
 
-# ===== SR =====
+# ===== SUPPORT RESISTANCE =====
 def get_sr(data):
     support = max(data, key=lambda x: x['pe'])['strike']
     resistance = max(data, key=lambda x: x['ce'])['strike']
@@ -132,6 +123,12 @@ def confidence(data):
             score += 1
     return round((score / 10) * 100, 2)
 
+# ===== ACCURACY =====
+def get_accuracy():
+    if total_trades == 0:
+        return 0
+    return round((wins / total_trades) * 100, 2)
+
 # ===== BEST STRIKE =====
 def best_strike(data, signal):
     best = None
@@ -141,29 +138,22 @@ def best_strike(data, signal):
         if "CALL" in signal and d['pe_chg'] > max_change:
             max_change = d['pe_chg']
             best = d['strike']
+
         elif "PUT" in signal and d['ce_chg'] > max_change:
             max_change = d['ce_chg']
             best = d['strike']
 
-    if best:
-        return best
-    return None
+    return best
 
 # ===== SL TARGET =====
 def get_trade_levels(price):
     return price - 10, price + 20
 
-# ===== ACCURACY =====
-def get_accuracy():
-    if total_trades == 0:
-        return 0
-    return round((wins / total_trades) * 100, 2)
-
 # ===== MAIN =====
 def run():
-    global last_signal, last_trade_time, prev_price
+    global prev_price, total_trades
 
-    print("🚀 FINAL SYSTEM STARTED")
+    print("🚀 SYSTEM STARTED")
     send_telegram("✅ SYSTEM STARTED")
 
     while True:
@@ -179,27 +169,45 @@ def run():
             data = get_data(chain, atm)
             support, resistance = get_sr(data)
 
+            print(f"LTP: {ltp} | S: {support} | R: {resistance}")
+
+            # SIDEWAYS
             price_move = abs(ltp - prev_price)
             prev_price = ltp
 
-            if price_move < 2:
+            if price_move < 3:
                 print("SIDEWAYS")
                 time.sleep(5)
                 continue
 
             trend = oi_trend(data)
             conf = confidence(data)
+            acc = get_accuracy()
 
-            if conf < 50:
-                print("low Confidence")
+            print(f"Trend: {trend} | Conf: {conf} | Acc: {acc}")
+
+            # 🔥 ACCURACY FILTER
+            if acc < 50 and total_trades > 5:
+                print("Low Accuracy - Skip Trade")
+                time.sleep(5)
+                continue
+
+            if conf < 35:
+                print("Low Confidence")
                 time.sleep(5)
                 continue
 
             signal = ""
-            if ltp > support + 20 and trend == "BULLISH":
+
+            if trend == "BULLISH" and ltp >= resistance - 5:
                 signal = "BUY CALL"
-            elif ltp < resistance - 20 and trend == "BEARISH":
+
+            elif trend == "BEARISH" and ltp <= support + 5:
                 signal = "BUY PUT"
+
+            if signal == "":
+                time.sleep(5)
+                continue
 
             strike = best_strike(data, signal)
 
@@ -208,41 +216,27 @@ def run():
 
             opt_ltp = get_option_ltp(strike, "CE" if "CALL" in signal else "PE")
             sl, target = get_trade_levels(opt_ltp)
-            acc = get_accuracy()
 
-            print(f"NIFTY: {ltp} | Signal: {signal} | Strike: {strike}")
+            total_trades += 1
 
-            current_time = time.time()
-            if current_time - last_trade_time < 300:
-                continue
-
-            if signal != last_signal and "BUY" in signal:
-                msg = f"""
-🔥 FINAL SYSTEM 🔥
-
-Price: {ltp}
+            msg = f"""
+🔥 SIGNAL ALERT 🔥
 Signal: {signal}
-
 Strike: {strike}
-Option Price: {opt_ltp}
-
+Price: {opt_ltp}
 SL: {sl}
 Target: {target}
-
 Confidence: {conf}%
-Trend: {trend}
-
 Accuracy: {acc}%
 """
-                send_telegram(msg)
-                last_signal = signal
-                last_trade_time = current_time
 
-            time.sleep(5)
+            print(msg)
+            send_telegram(msg)
+
+            time.sleep(10)
 
         except Exception as e:
-            print("ERROR:", e)
+            print("Error:", e)
+            time.sleep(5)
 
-# ===== START =====
-if __name__ == "__main__":
-    run()
+run()
