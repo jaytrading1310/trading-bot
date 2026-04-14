@@ -3,7 +3,7 @@ import time
 from datetime import datetime, timedelta
 
 # ===== CONFIG =====
-ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiJFVTkzNDciLCJqdGkiOiI2OWRjNjc1MDhmNDVmNDU3Y2EwNzMzYTgiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6dHJ1ZSwiaWF0IjoxNzc2MDUyMDQ4LCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOjE3NzYxMTc2MDB9.O-tu4MQpEkst0EXZyfPZPZ9bSdcViigsyyJxcU91i0Y"
+ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiJFVTkzNDciLCJqdGkiOiI2OWRkZmFlMmUwZDZmYjQ5ZDgwNDI2MTAiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6dHJ1ZSwiaWF0IjoxNzc2MTU1MzYyLCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOjE3NzYyMDQwMDB9.BB92qxLjvRWKa0EUFpaqlNHYyEAemo8T6Dofn75h22g"
 BOT_TOKEN = "8726435378:AAEhAviD-pwjF-IY-wYcUVlPBKYZIjpBXB4"
 CHAT_ID = "-1003724403519"
 
@@ -14,7 +14,10 @@ HEADERS = {
 
 # ===== GLOBAL =====
 prev_data = {}
+fixed_support = None
+fixed_resistance = None
 prev_price = 0
+
 total_trades = 0
 wins = 0
 
@@ -43,11 +46,14 @@ def get_ltp():
     return list(res.json()['data'].values())[0]['last_price']
 
 # ===== OPTION LTP =====
-def get_option_ltp(strike, option_type):
+def get_option_ltp(strike, signal):
     try:
-        symbol = f"NSE_FO|NIFTY {strike} {option_type}"
+        opt_type = "CE" if signal == "BUY CALL" else "PE"
+        symbol = f"NSE_FO|NIFTY {strike} {opt_type}"
+
         url = "https://api.upstox.com/v2/market-quote/ltp"
         params = {"instrument_key": symbol}
+
         res = requests.get(url, headers=HEADERS, params=params)
         return list(res.json()['data'].values())[0]['last_price']
     except:
@@ -69,12 +75,13 @@ def get_chain():
 
 # ===== DATA =====
 def get_data(chain, atm):
-    strikes = [atm-100, atm-50, atm, atm+50, atm+100]
+    strikes = list(range(atm-200, atm+201, 50))
     data = []
 
     for item in chain:
         if item['strike_price'] in strikes:
             strike = item['strike_price']
+
             ce = item['call_options']['market_data']['oi']
             pe = item['put_options']['market_data']['oi']
 
@@ -102,26 +109,80 @@ def get_sr(data):
     resistance = max(data, key=lambda x: x['ce'])['strike']
     return support, resistance
 
-# ===== TREND =====
-def oi_trend(data):
-    ce = sum(d['ce_chg'] for d in data)
-    pe = sum(d['pe_chg'] for d in data)
+# ===== OI + PRICE SIGNAL =====
+def oi_price_signal(data, ltp, prev_price):
+    bullish = 0
+    bearish = 0
 
-    if pe > ce:
-        return "BULLISH"
-    elif ce > pe:
-        return "BEARISH"
+    for d in data:
+        if ltp > prev_price:
+            if d['pe_chg'] > 0:
+                bullish += 1
+            if d['ce_chg'] < 0:
+                bullish += 1
+
+        elif ltp < prev_price:
+            if d['ce_chg'] > 0:
+                bearish += 1
+            if d['pe_chg'] < 0:
+                bearish += 1
+
+    return bullish, bearish
+
+# ===== WEIGHTED MULTI STRIKE =====
+def weighted_cluster(data, atm):
+    lower_bull = 0
+    upper_bear = 0
+
+    for d in data:
+        strike = d['strike']
+
+        if strike < atm:
+            if d['pe_chg'] > 0:
+                lower_bull += 2
+            if d['ce_chg'] < 0:
+                lower_bull += 1
+
+        elif strike > atm:
+            if d['ce_chg'] > 0:
+                upper_bear += 2
+            if d['pe_chg'] < 0:
+                upper_bear += 1
+
+    return lower_bull, upper_bear
+
+# ===== STRENGTH =====
+def signal_strength(bullish, bearish, lower_bull, upper_bear):
+
+    if lower_bull >= 6:
+        return "SUPER STRONG BULLISH 🔥"
+
+    if upper_bear >= 6:
+        return "SUPER STRONG BEARISH 🔥"
+
+    if bullish >= 6:
+        return "STRONG BULLISH"
+
+    if bearish >= 6:
+        return "STRONG BEARISH"
+
+    if bullish >= 3:
+        return "WEAK BULLISH"
+
+    if bearish >= 3:
+        return "WEAK BEARISH"
+
     return "NEUTRAL"
 
 # ===== CONFIDENCE =====
-def confidence(data):
+def get_confidence(data):
     score = 0
     for d in data:
         if d['pe'] > d['ce'] and d['pe_chg'] > 0:
             score += 1
         if d['ce'] > d['pe'] and d['ce_chg'] > 0:
             score += 1
-    return round((score / 10) * 100, 2)
+    return round((score / (len(data)*2)) * 100, 2)
 
 # ===== ACCURACY =====
 def get_accuracy():
@@ -132,106 +193,123 @@ def get_accuracy():
 # ===== BEST STRIKE =====
 def best_strike(data, signal):
     best = None
-    max_change = 0
+    max_val = 0
 
     for d in data:
-        if "CALL" in signal and d['pe_chg'] > max_change:
-            max_change = d['pe_chg']
+        if signal == "BUY CALL" and d['pe_chg'] > max_val:
+            max_val = d['pe_chg']
             best = d['strike']
 
-        elif "PUT" in signal and d['ce_chg'] > max_change:
-            max_change = d['ce_chg']
+        elif signal == "BUY PUT" and d['ce_chg'] > max_val:
+            max_val = d['ce_chg']
             best = d['strike']
 
     return best
 
 # ===== SL TARGET =====
-def get_trade_levels(price):
+def get_sl_target(price):
     return price - 10, price + 20
 
 # ===== MAIN =====
 def run():
-    global prev_price, total_trades
+    global fixed_support, fixed_resistance, prev_price, total_trades
 
     print("🚀 SYSTEM STARTED")
     send_telegram("✅ SYSTEM STARTED")
 
     while True:
         try:
+            now = datetime.now()
+            current_time = now.strftime("%H:%M")
+
+            if current_time < "09:30":
+                time.sleep(10)
+                continue
+
             ltp = get_ltp()
             atm = get_atm(ltp)
             chain = get_chain()
 
             if not chain:
-                time.sleep(3)
+                time.sleep(5)
                 continue
 
             data = get_data(chain, atm)
             support, resistance = get_sr(data)
 
-            print(f"LTP: {ltp} | S: {support} | R: {resistance}")
+            if fixed_support is None:
+                fixed_support = support
+                fixed_resistance = resistance
 
-            # SIDEWAYS
-            price_move = abs(ltp - prev_price)
+            if current_time < "10:15":
+                time.sleep(10)
+                continue
+
+            move = abs(ltp - prev_price)
             prev_price = ltp
 
-            if price_move < 3:
-                print("SIDEWAYS")
+            if move < 3:
                 time.sleep(5)
                 continue
 
-            trend = oi_trend(data)
-            conf = confidence(data)
+            conf = get_confidence(data)
             acc = get_accuracy()
 
-            print(f"Trend: {trend} | Conf: {conf} | Acc: {acc}")
-
-            # 🔥 ACCURACY FILTER
-            if acc < 50 and total_trades > 5:
-                print("Low Accuracy - Skip Trade")
-                time.sleep(5)
+            if conf < 40:
                 continue
 
-            if conf < 35:
-                print("Low Confidence")
-                time.sleep(5)
-                continue
+            bullish, bearish = oi_price_signal(data, ltp, prev_price)
+
+            lower_bull, upper_bear = weighted_cluster(data, atm)
+
+            strength = signal_strength(bullish, bearish, lower_bull, upper_bear)
 
             signal = ""
 
-            if trend == "BULLISH" and ltp >= resistance - 5:
+            if "BULLISH" in strength and ltp >= fixed_resistance:
                 signal = "BUY CALL"
 
-            elif trend == "BEARISH" and ltp <= support + 5:
+            elif "BEARISH" in strength and ltp <= fixed_support:
                 signal = "BUY PUT"
 
             if signal == "":
-                time.sleep(5)
                 continue
 
             strike = best_strike(data, signal)
+            opt_price = get_option_ltp(strike, signal)
 
-            if not strike:
+            if opt_price == 0:
                 continue
 
-            opt_ltp = get_option_ltp(strike, "CE" if "CALL" in signal else "PE")
-            sl, target = get_trade_levels(opt_ltp)
+            sl, target = get_sl_target(opt_price)
 
             total_trades += 1
 
             msg = f"""
-🔥 SIGNAL ALERT 🔥
+🔥 FINAL SIGNAL 🔥
+
+Type: {strength}
 Signal: {signal}
 Strike: {strike}
-Price: {opt_ltp}
+Price: {opt_price}
+
 SL: {sl}
 Target: {target}
+
 Confidence: {conf}%
 Accuracy: {acc}%
+
+Support: {fixed_support}
+Resistance: {fixed_resistance}
+
+Time: {current_time}
 """
 
             print(msg)
             send_telegram(msg)
+
+            fixed_support = None
+            fixed_resistance = None
 
             time.sleep(10)
 
