@@ -289,7 +289,7 @@ Time: {current_time}
 
         except Exception as e:
             print("❌ ERROR:", e)
-            send_telegram(f"ERROR: {e}")
+            send_telegram("ERROR:", e)
             time.sleep(5)
 
 run()
