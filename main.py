@@ -1,6 +1,10 @@
 import requests
 import time
 from datetime import datetime, timedelta
+import pytz
+
+# ===== TIMEZONE =====
+IST = pytz.timezone('Asia/Kolkata')
 
 # ===== CONFIG =====
 ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiJFVTkzNDciLCJqdGkiOiI2OWU4NDA3YzdjNDE5ZDFjNWQwMGFjNTUiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6dHJ1ZSwiaWF0IjoxNzc2ODI4NTQwLCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOjE3NzY4OTUyMDB9.RotC9PiKrYxcrvmukLlmM6JfeHpWRb-NyqVg4NQ6d_4"
@@ -29,10 +33,10 @@ def send_telegram(msg):
     except:
         print("Telegram error")
 
-# ===== EXPIRY =====
+# ===== EXPIRY (TUESDAY - NIFTY) =====
 def get_expiry():
-    today = datetime.now()
-    days_ahead = 1 - today.weekday()
+    today = datetime.now(IST)
+    days_ahead = 1 - today.weekday()  # Tuesday
     if days_ahead <= 0:
         days_ahead += 7
     expiry = today + timedelta(days=days_ahead)
@@ -153,18 +157,19 @@ def run():
 
     while True:
         try:
-            now = datetime.now()
+            now = datetime.now(IST)
             current_time = now.strftime("%H:%M")
 
             print(f"\n⏰ TIME: {current_time}")
 
-            # 💓 HEARTBEAT
+            # 💓 HEARTBEAT (every 10 min)
             if now.minute % 10 == 0 and last_heartbeat != now.minute:
                 msg = f"💓 SYSTEM RUNNING {current_time}"
                 print(msg)
                 send_telegram(msg)
                 last_heartbeat = now.minute
 
+            # ===== WAIT MARKET =====
             if current_time < "09:30":
                 print("⏳ Waiting market...")
                 time.sleep(10)
@@ -193,6 +198,13 @@ def run():
 
             print(f"🔒 FIXED SR → {fixed_support} | {fixed_resistance}")
 
+            # ===== TELEGRAM SR UPDATE =====
+            sr_key = f"{support}-{resistance}"
+            if sr_key != last_sent_sr:
+                send_telegram(f"📊 SR UPDATE\nSupport: {support}\nResistance: {resistance}")
+                last_sent_sr = sr_key
+
+            # ===== WAIT AFTER 10:15 =====
             if current_time < "10:15":
                 print("⏳ Waiting 10:15...")
                 time.sleep(10)
@@ -217,6 +229,7 @@ def run():
                 continue
 
             signal = ""
+
             if "BULLISH" in st and ltp >= fixed_resistance:
                 signal = "BUY CALL"
             elif "BEARISH" in st and ltp <= fixed_support:
@@ -228,16 +241,22 @@ def run():
             strike = best_strike(data, signal)
             opt_price = get_option_ltp(strike, signal)
 
+            if opt_price == 0:
+                continue
+
             sl, tgt = sl_target(opt_price)
 
             msg = f"""
 🔥 SIGNAL 🔥
+
 Type: {st}
 Signal: {signal}
 Strike: {strike}
 Price: {opt_price}
+
 SL: {sl}
 Target: {tgt}
+
 Confidence: {conf}%
 Time: {current_time}
 """
