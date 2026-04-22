@@ -202,6 +202,7 @@ def run():
                 print("⏳ Waiting market...")
                 time.sleep(10)
                 continue
+            
 
             ltp = get_ltp()
             if ltp is None:
@@ -209,12 +210,15 @@ def run():
                 continue
 
             atm = get_atm(ltp)
+
             chain = get_chain()
 
             if not chain:
                 print("❌ No data")
                 time.sleep(5)
                 continue
+            
+            time.sleep(10)
 
             print(f"📈 LTP: {ltp}")
             print(f"📊 Chain: {len(chain)} | Expiry: {get_expiry()}")
@@ -286,11 +290,11 @@ Time: {current_time}
             fixed_support = None
             fixed_resistance = None
 
-            time.sleep(10)
+            time.sleep(20)
 
         except Exception as e:
             print("❌ ERROR:", e)
             send_telegram(f"ERROR: {e}")
-            time.sleep(5)
+            time.sleep(15)
 
 run()
