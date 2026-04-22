@@ -84,22 +84,6 @@ def get_chain():
 
     return data
 
-# ===== OPTION LTP =====
-def get_option_ltp(strike, signal):
-    try:
-        opt = "CE" if signal == "BUY CALL" else "PE"
-        symbol = f"NSE_FO|NIFTY {strike} {opt}"
-
-        url = "https://api.upstox.com/v2/market-quote/ltp"
-        data = safe_request(url, {"instrument_key": symbol})
-
-        if not data:
-            return 0
-
-        return list(data.values())[0]['last_price']
-    except:
-        return 0
-
 # ===== ATM =====
 def get_atm(price):
     return int(round(price / 50) * 50)
@@ -121,12 +105,14 @@ def get_data(chain, atm):
             prev_pe = prev_data.get(strike, {}).get("pe", pe)
 
             data.append({
-                "strike": strike,
-                "ce": ce,
-                "pe": pe,
-                "ce_chg": ce - prev_ce,
-                "pe_chg": pe - prev_pe
-            })
+    "strike": strike,
+    "ce": ce,
+    "pe": pe,
+    "ce_chg": ce - prev_ce,
+    "pe_chg": pe - prev_pe,
+    "ce_price": item['call_options']['market_data'].get('ltp', 0),
+    "pe_price": item['put_options']['market_data'].get('ltp', 0)
+})
 
             prev_data[strike] = {"ce": ce, "pe": pe}
 
@@ -174,6 +160,16 @@ def best_strike(data, signal):
             best = d['strike']
     return best
 
+def get_option_price(data, strike, signal):
+    for d in data:
+        if d['strike'] == strike:
+            if signal == "BUY CALL":
+                return d['ce_price']
+            else:
+                return d['pe_price']
+    return 0
+
+
 def sl_target(price):
     return price - 10, price + 20
 
@@ -217,7 +213,6 @@ def run():
                 print("❌ No data")
                 time.sleep(5)
                 continue
-            
             time.sleep(10)
 
             print(f"📈 LTP: {ltp}")
@@ -269,6 +264,9 @@ def run():
 
             strike = best_strike(data, signal)
             opt_price = get_option_ltp(strike, signal)
+            if opt_price == 0:
+                print("⚠️ Invalid option price skip")
+                continue
 
             sl, tgt = sl_target(opt_price)
 
