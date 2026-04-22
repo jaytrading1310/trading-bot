@@ -263,7 +263,7 @@ def run():
                 continue
 
             strike = best_strike(data, signal)
-            opt_price = get_option_ltp(strike, signal)
+            opt_price = get_option_price(data, strike, signal)
             if opt_price == 0:
                 print("⚠️ Invalid option price skip")
                 continue
