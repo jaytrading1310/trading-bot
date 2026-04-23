@@ -181,6 +181,11 @@ def run():
 
             print(f"\n⏰ TIME: {current_time}")
 
+            # HEARTBEAT
+            if now.minute // 10 != last_heartbeat:
+                send_telegram(f"💓 SYSTEM RUNNING {current_time}")
+                last_heartbeat = now.minute // 10
+                
             # MARKET START
             if current_time >= "09:15" and not market_started:
                 send_telegram("🚀 Market Started")
@@ -200,11 +205,6 @@ def run():
                     market_closed_sent = True
                 time.sleep(60)
                 continue
-
-            # HEARTBEAT
-            if now.minute % 10 == 0 and last_heartbeat != now.minute:
-                send_telegram(f"💓 SYSTEM RUNNING {current_time}")
-                last_heartbeat = now.minute
 
             # SR RESET
             if current_time in ["10:20", "13:45"]:
