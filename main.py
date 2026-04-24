@@ -17,15 +17,21 @@ HEADERS = {
     "Authorization": f"Bearer {ACCESS_TOKEN}"
 }
 
+# ===== GLOBAL =====
 prev_data = {}
 fixed_support = None
 fixed_resistance = None
 prev_price = 0
 
 last_heartbeat = None
-active_trade = None
-market_closed_sent = False
+last_sr_update = None
 
+active_trade = None
+reentry_ready = False
+last_direction = None
+
+market_started = False
+market_closed_sent = False
 
 # ===== TELEGRAM =====
 def send_telegram(msg):
@@ -33,8 +39,7 @@ def send_telegram(msg):
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
     except:
-        print("❌ Telegram error")
-
+        print("Telegram error")
 
 # ===== EXPIRY =====
 def get_expiry():
@@ -45,43 +50,25 @@ def get_expiry():
     expiry = today + timedelta(days=days_ahead)
     return expiry.strftime("%Y-%m-%d")
 
-
 # ===== SAFE API =====
 def safe_request(url, params=None):
     try:
         res = requests.get(url, headers=HEADERS, params=params)
         data = res.json()
-
-        if not data or "data" not in data or not data["data"]:
-            print("❌ Empty API data")
+        if "data" not in data:
             return None
-
         return data["data"]
-
-    except Exception as e:
-        print("❌ API ERROR:", e)
+    except:
         return None
-
 
 # ===== LTP =====
 def get_ltp():
     url = "https://api.upstox.com/v2/market-quote/ltp"
     params = {"instrument_key": "NSE_INDEX|Nifty 50"}
-
-    for _ in range(3):
-        data = safe_request(url, params)
-
-        if data:
-            try:
-                key = list(data.keys())[0]
-                return data[key]["last_price"]
-            except:
-                pass
-
-        time.sleep(1)
-
-    return None
-
+    data = safe_request(url, params)
+    if not data:
+        return None
+    return list(data.values())[0]['last_price']
 
 # ===== OPTION CHAIN =====
 def get_chain():
@@ -92,12 +79,11 @@ def get_chain():
     }
     return safe_request(url, params) or []
 
-
-# ===== HELPERS =====
+# ===== ATM =====
 def get_atm(price):
     return int(round(price / 50) * 50)
 
-
+# ===== DATA =====
 def get_data(chain, atm):
     global prev_data
     strikes = list(range(atm-150, atm+150, 50))
@@ -127,18 +113,24 @@ def get_data(chain, atm):
 
     return data
 
-
-# ===== LOGIC =====
+# ===== SR =====
 def get_sr(data):
     support = max(data, key=lambda x: x['pe'])['strike']
     resistance = max(data, key=lambda x: x['ce'])['strike']
     return support, resistance
 
+# ===== SIGNAL =====
+def smart_oi_signal(data, atm):
+    top_pe = sorted(data, key=lambda x: x['pe_chg'], reverse=True)[:3]
+    top_ce = sorted(data, key=lambda x: x['ce_chg'], reverse=True)[:3]
 
-def oi_signal(data):
-    bull = sum(1 for d in data if d['pe_chg'] > 0)
-    bear = sum(1 for d in data if d['ce_chg'] > 0)
-    return bull, bear
+    pe_score = sum(d['pe_chg'] for d in top_pe)
+    ce_score = sum(d['ce_chg'] for d in top_ce)
+
+    pe_near = sum(1 for d in top_pe if abs(d['strike'] - atm) <= 100)
+    ce_near = sum(1 for d in top_ce if abs(d['strike'] - atm) <= 100)
+
+    return pe_score, ce_score, pe_near, ce_near
 
 
 def weighted(data, atm):
@@ -146,32 +138,41 @@ def weighted(data, atm):
     w_bear = sum(2 for d in data if d['strike'] > atm and d['ce_chg'] > 0)
     return w_bull, w_bear
 
-
 def strength(bull, bear, w_bull, w_bear):
     if w_bull >= 6:
-        return "🔥 BULLISH"
+        return "SUPER STRONG BULLISH 🔥"
     if w_bear >= 6:
-        return "🔻 BEARISH"
-    return "⚪ WEAK"
-
+        return "SUPER STRONG BEARISH 🔥"
+    if bull >= 5:
+        return "STRONG BULLISH"
+    if bear >= 5:
+        return "STRONG BEARISH"
+    return "WEAK"
 
 def confidence(data):
     score = sum(1 for d in data if d['pe'] > d['ce'])
     return round((score / len(data)) * 100, 2)
 
-
-def best_strike(data, signal):
+def best_strike(data, signal, atm):
     best = None
-    max_val = 0
+    max_score = -999999
 
     for d in data:
-        val = d['pe_chg'] if signal == "BUY CALL" else d['ce_chg']
-        if val > max_val:
-            max_val = val
+        distance = abs(d['strike'] - atm)
+
+        if distance > 100:
+            continue   # far strike skip
+
+        if signal == "BUY CALL":
+            score = d['ce_chg'] - distance * 10
+        else:
+            score = d['pe_chg'] - distance * 10
+
+        if score > max_score:
+            max_score = score
             best = d['strike']
 
-    return best
-
+    return best if best else atm
 
 def get_option_price(data, strike, signal):
     for d in data:
@@ -179,11 +180,15 @@ def get_option_price(data, strike, signal):
             return d['ce_price'] if signal == "BUY CALL" else d['pe_price']
     return 0
 
+def sl_target(price):
+    return price - 10, price + 20
 
 # ===== MAIN =====
 def run():
     global fixed_support, fixed_resistance, prev_price
-    global last_heartbeat, active_trade, market_closed_sent
+    global last_heartbeat, last_sr_update
+    global active_trade, reentry_ready, last_direction
+    global market_started, market_closed_sent
 
     print("🚀 SYSTEM STARTED")
     send_telegram("✅ SYSTEM STARTED")
@@ -193,14 +198,23 @@ def run():
             now = datetime.now(IST)
             current_time = now.strftime("%H:%M")
 
-            print(f"\n⏰ TIME: {current_time}")
-
             # HEARTBEAT
             if now.minute // 10 != last_heartbeat:
                 send_telegram(f"💓 SYSTEM RUNNING {current_time}")
                 last_heartbeat = now.minute // 10
+                
+            # MARKET START
+            if current_time >= "09:15" and not market_started:
+                send_telegram("🚀 Market Started")
+                market_started = True
+                market_closed_sent = False
 
-            # MARKET CLOSE
+            # BEFORE MARKET
+            if current_time < "09:15":
+                time.sleep(30)
+                continue
+
+            # MARKET CLOSED
             if current_time > "15:30":
                 if not market_closed_sent:
                     print("🛑 Market Closed")
@@ -209,16 +223,22 @@ def run():
                 time.sleep(60)
                 continue
 
+            # SR RESET
+            if current_time in ["10:20", "13:45"]:
+                if last_sr_update != current_time:
+                    send_telegram(f"🔄 SR RESET {current_time}")
+                    fixed_support = None
+                    fixed_resistance = None
+                    last_sr_update = current_time
+
             ltp = get_ltp()
             if not ltp:
-                print("❌ LTP missing")
                 continue
 
             atm = get_atm(ltp)
             chain = get_chain()
 
             if not chain:
-                print("❌ Chain missing")
                 continue
 
             data = get_data(chain, atm)
@@ -228,60 +248,124 @@ def run():
                 fixed_support = support
                 fixed_resistance = resistance
 
-            print(f"📈 LTP: {ltp}")
-            print(f"📊 Chain: {len(chain)} | Expiry: {get_expiry()}")
-            print(f"📊 LIVE SR → {support} | {resistance}")
-            print(f"🔒 FIXED SR → {fixed_support} | {fixed_resistance}")
 
-            bull, bear = oi_signal(data)
-            w_bull, w_bear = weighted(data, atm)
+            # ===== EXIT =====
+            if active_trade:
+                strike = active_trade['strike']
+                signal = active_trade['signal']
+                entry = active_trade['entry']
+                sl = active_trade['sl']
+                target = active_trade['target']
 
-            st = strength(bull, bear, w_bull, w_bear)
+                price = get_option_price(data, strike, signal)
+
+                if price >= target:
+                    send_telegram(f"🎯 TARGET HIT {strike} @ {price}")
+                    active_trade = None
+                    reentry_ready = True
+                    continue
+
+                if price <= sl:
+                    send_telegram(f"❌ SL HIT {strike} @ {price}")
+                    active_trade = None
+                    reentry_ready = True
+                    continue
+
+            if current_time < "10:15":
+                continue
+
+            pe_score, ce_score, pe_near, ce_near = smart_oi_signal(data, atm)
+            if pe_score > abs(ce_score) and ce_score < 0 and pe_near >= 2:
+                st = "🔥 BULLISH"
+            elif ce_score > abs(pe_score) and pe_score < 0 and ce_near >= 2:
+                st = "🔻 BEARISH"
+            else:
+                st = "⚪ WEAK"
+
             conf = confidence(data)
 
-            print(f"📊 Strength: {st} | Confidence: {conf}%")
+            print("\n" + "="*40)
 
+            print(f"⏰ TIME: {current_time}")
+            print(f"📊 LTP: {ltp}")
+            print(f"📊 Chain: {len(chain)} | Expiry: {get_expiry()}")
+
+            print(f"\n📈 LIVE SR → {support} | {resistance}")
+            print(f"🔒 FIXED SR → {fixed_support} | {fixed_resistance}")
+
+            print(f"\n📊 Strength: {st} | Confidence: {conf}%")
+
+            print("="*40)
+
+            if "WEAK" in st:
+                continue
+           
             move = abs(ltp - prev_price)
             prev_price = ltp
 
             if move < 1.5:
-                print("⚠️ Sideways")
-                time.sleep(3)
                 continue
 
-            if conf < 50:
+            if conf < 40:
                 continue
+
 
             signal = ""
 
-            if "BULLISH" in st and ltp >= fixed_resistance:
+            if "BULLISH" in st and ltp >= (fixed_resistance + 5):
                 signal = "BUY CALL"
-            elif "BEARISH" in st and ltp <= fixed_support:
+            elif "BEARISH" in st and ltp <= (fixed_support - 5):
                 signal = "BUY PUT"
 
-            if signal and active_trade is None:
-                strike = best_strike(data, signal)
+            # ===== ENTRY / RE-ENTRY =====
+            if signal != "" and active_trade is None:
+
+                # normal entry
+                if not reentry_ready:
+                    pass
+
+                # re-entry
+                elif last_direction == signal:
+                    print("🔁 RE-ENTRY SIGNAL")
+
+                else:
+                    continue
+
+                strike = best_strike(data, signal, atm)
                 price = get_option_price(data, strike, signal)
 
                 if price == 0:
                     continue
 
+                sl, tgt = sl_target(price)
+
+                active_trade = {
+                    "strike": strike,
+                    "signal": signal,
+                    "entry": price,
+                    "sl": sl,
+                    "target": tgt
+                }
+
+                last_direction = signal
+
                 send_telegram(f"""
-🔥 ENTRY SIGNAL
+🔥 {'RE-ENTRY' if reentry_ready else 'ENTRY'}
 {signal}
 Strike: {strike}
 Price: {price}
+SL: {sl}
+Target: {tgt}
 Conf: {conf}%
 Time: {current_time}
 """)
 
-                active_trade = True
-
-            time.sleep(3)
+            reentry_ready = False
 
         except Exception as e:
-            print("❌ ERROR:", e)
-            time.sleep(5)
+            print("ERROR:", e)
+            time.sleep(1)
 
+            time.sleep(1)
 
 run()
